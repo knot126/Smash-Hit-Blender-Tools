@@ -11,7 +11,7 @@ import random
 import math
 
 # Version of mesh baker; this is not used anywhere.
-VERSION = (0, 13, 2)
+VERSION = (0, 14, 0)
 
 # The number of rows and columns in the tiles.mtx.png file. Change this if you
 # have overloaded the file with more tiles; note that you will also need to
@@ -44,6 +44,9 @@ VERTEX_LIGHT_ENABLED = True
 
 # Half of the size of the delta box when using the delta-box lighting method
 VERTEX_LIGHT_DELTA_BOX_SIZE = 0.5
+
+# Sets the mode for faked global illumination. Options are "None" and "Fast"
+GLOBAL_ILLUMINATION_TYPE = "Fast"
 
 ################################################################################
 ### END OF CONFIGURATION #######################################################
@@ -146,6 +149,12 @@ class Vector3:
 		z = self.x * other.y - self.y * other.x
 		return Vector3(x, y, z)
 	
+	def compose(self, other):
+		return Vector3(self.x * other.x, self.y * other.y, self.z * other.z)
+	
+	def anticompose(self, other):
+		return Vector3(self.x / other.x, self.y / other.y, self.z / other.z)
+	
 	def copy(self):
 		return Vector3(self.x, self.y, self.z)
 	
@@ -159,6 +168,9 @@ class Vector3:
 		v = self.copy()
 		v.a = light
 		return v
+	
+	def asTuple(self):
+		return (self.x, self.y, self.z)
 	
 	def partialOpposite(self, ax, ay, az):
 		"""
@@ -235,6 +247,58 @@ class SegmentInfo:
 		
 		return (total, intersected)
 
+def doFastGI(x, y, z, r, g, b, gc):
+	"""
+	Does a rough approximation of global illumination for the current point.
+	This is very engineered and very approximate.
+	
+	TODO: Fix bug where lights will show in places they should not show
+	"""
+	
+	# TODO: Make these globals
+	FASTGI_LIGHT_AMBIENT = Vector3(0.72, 0.72, 0.72)
+	FASTGI_LIGHT_SPAN = 5
+	
+	# Find the intensity of light with box size r and distance from box d
+	findIntenstity = lambda r, d : min(max(1 - ((d - r) / FASTGI_LIGHT_SPAN), 0), 1)
+	
+	# Set a proper vector for the current colour
+	old_colour = Vector3(r, g, b)
+	
+	# Colour that will be added to old colour
+	add_colour = Vector3(0.0, 0.0, 0.0)
+	
+	# Make a proper vector for the current point coordintes
+	point = Vector3(x, y, z)
+	
+	for box in gc.boxes:
+		# Compute difference from point to box origin
+		difference = (box.pos - point)
+		distance = difference.length()
+		
+		# Find the nearest side coordinate index
+		facing_side = (0 if ((abs(difference.x) > abs(difference.y)) and (abs(difference.x) > abs(difference.z))) else (1 if (abs(difference.y) > abs(difference.z)) else 2))
+		
+		# Set box colour
+		box_colour = box.colour[facing_side]
+		
+		# Find the "radius" of the box used to make sure box size is less likely
+		# to affect the amount of light cast
+		radius = [box.size.x, box.size.y, box.size.z][facing_side]
+		
+		# Find the new colour of the point based on how much light was added to
+		# the point and its intensity.
+		add_colour += box_colour * findIntenstity(radius, distance) * box.glow
+	
+	# Normalise colour with respect to box count so this can't go over 1.0 on
+	# each component
+	add_colour = add_colour * (1 / len(gc.boxes))
+	
+	# Get the final colour by adding to base box colour
+	r, g, b = (old_colour.compose(FASTGI_LIGHT_AMBIENT) + add_colour.compose(Vector3(1.0, 1.0, 1.0) - FASTGI_LIGHT_AMBIENT)).asTuple()
+	
+	return (r, g, b)
+
 def doVertexLights(x, y, z, a, gc, normal):
 	"""
 	Compute the light at a vertex
@@ -274,6 +338,9 @@ def correctColour(x, y, z, r, g, b, a, gc, normal):
 	"""
 	Do any final colour correction operations and per-vertex lighting.
 	"""
+	
+	if (GLOBAL_ILLUMINATION_TYPE == "Fast"):
+		r, g, b = doFastGI(x, y, z, r, g, b, gc)
 	
 	if (VERTEX_LIGHT_ENABLED):
 		a = doVertexLights(x, y, z, a, gc, normal)
@@ -525,7 +592,7 @@ class Box:
 	Very simple container for box data
 	"""
 	
-	def __init__(self, seg, pos, size, colour = [Vector3(1.0, 1.0, 1.0), Vector3(1.0, 1.0, 1.0), Vector3(1.0, 1.0, 1.0)], tile = (0, 0, 0), tileSize = (1.0, 1.0, 1.0), tileRot = (0, 0, 0)):
+	def __init__(self, seg, pos, size, colour = [Vector3(1.0, 1.0, 1.0), Vector3(1.0, 1.0, 1.0), Vector3(1.0, 1.0, 1.0)], tile = (0, 0, 0), tileSize = (1.0, 1.0, 1.0), tileRot = (0, 0, 0), glow = 1):
 		"""
 		seg: global segment context
 		pos: position
@@ -534,6 +601,7 @@ class Box:
 		tile: list or tuple of tiles to use
 		tileSize: size of the box tiles
 		tileRot: rotation of the boxes
+		glow: Extension that enables this box as a sort of light, true by default
 		"""
 		
 		# Expand shorthands for vectors
@@ -551,6 +619,7 @@ class Box:
 		self.tile = tile
 		self.tileSize = tileSize
 		self.tileRot = tileRot
+		self.glow = glow
 	
 	def bakeGeometry(self):
 		"""
@@ -779,7 +848,11 @@ def parseXml(data, templates = {}):
 				# Tile rotation -- rot1 [rot2 rot3]
 				tileRot = parseIntTriplet(getFromTemplate(a, templates, t, "tileRot", "1"))
 				
-				boxes.append(Box(seg, pos, size, colour, tile, tileSize, tileRot))
+				# NOTE: This is an extension used for GI/glow effect
+				# Glow -- glow
+				glow = float(getFromTemplate(a, templates, t, "glow", "1"))
+				
+				boxes.append(Box(seg, pos, size, colour, tile, tileSize, tileRot, glow))
 	
 	return seg
 

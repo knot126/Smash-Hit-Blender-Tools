@@ -8,7 +8,7 @@ bl_info = {
 	"name": "Smash Hit Tools",
 	"description": "Segment exporter and property editor for Smash Hit",
 	"author": "Knot126",
-	"version": (2, 0, 0),
+	"version": (2, 0, 1),
 	"blender": (3, 0, 0),
 	"location": "File > Import/Export and 3D View > Tools",
 	"warning": "",
@@ -141,6 +141,10 @@ def sh_add_object(level_root, scene, obj, params):
 	# Add reflection property for boxes if not default
 	if (sh_type == "BOX" and obj.sh_properties.sh_reflective):
 		properties["reflection"] = "1"
+	
+	# Add glow property for boxes if not default
+	if (sh_type == "BOX" and obj.sh_properties.sh_glow != 1.0):
+		properties["glow"] = str(obj.sh_properties.sh_glow)
 	
 	# Add decal number if this is a decal
 	if (sh_type == "DEC"):
@@ -302,6 +306,7 @@ def sh_export_segment(fp, context, *, compress = False, params = {"sh_vrmultiply
 		bake_mesh.BAKE_IGNORE_TILESIZE = params.get("bake_ignore_tilesize", False)
 		bake_mesh.PARTY_MODE = params.get("bake_partymode", False)
 		bake_mesh.VERTEX_LIGHT_ENABLED = params.get("bake_vertex_light", False)
+		bake_mesh.GLOBAL_ILLUMINATION_TYPE = params.get("bake_vertex_gi", "None")
 		bake_mesh.bakeMesh(content, meshfile, (params["sh_meshbake_template"] if params["sh_meshbake_template"] else None))
 	
 	# Write out file
@@ -468,14 +473,24 @@ class sh_ExportCommon(bpy.types.Operator, ExportHelper2):
 		)
 	
 	bake_vertex_light: BoolProperty(
-		name = "Per-vertex lighting",
-		description = "(Mesh mode only) Enables per-vertex lighting",
+		name = "Ambient occlusion",
+		description = "(Mesh mode only) Enables per-vertex shadowing (ambient occlusion)",
 		default = True
 		)
 	
+	bake_vertex_gi: EnumProperty(
+		name = "Advanced lighting",
+		description = "(Mesh mode only) Enables more advanced lighting effects, weather or not seen in real life, such as boxes contributing light to other boxes",
+		items = [ 
+			('None', "None", "Does not apply additional effects"),
+			('Fast', "FastGI", "Finds an approximation for the amount of light that is contributed by boxes at each point and adds this to the light at the point"),
+		],
+		default = "None"
+		)
+	
 	bake_partymode: BoolProperty(
-		name = "Party mode",
-		description = "(Mesh mode only) Try it :o)",
+		name = "Fun mode",
+		description = "(Mesh mode only)",
 		default = False
 		)
 
@@ -503,6 +518,7 @@ class sh_export(sh_ExportCommon):
 				"bake_unseen_sides": self.bake_unseen_faces,
 				"bake_ignore_tilesize": self.bake_ignore_tilesize,
 				"bake_vertex_light": self.bake_vertex_light,
+				"bake_vertex_gi": self.bake_vertex_gi,
 				"bake_partymode": self.bake_partymode,
 			}
 		)
@@ -536,6 +552,7 @@ class sh_export_gz(sh_ExportCommon):
 				"bake_unseen_sides": self.bake_unseen_faces,
 				"bake_ignore_tilesize": self.bake_ignore_tilesize,
 				"bake_vertex_light": self.bake_vertex_light,
+				"bake_vertex_gi": self.bake_vertex_gi,
 				"bake_partymode": self.bake_partymode,
 			}
 		)
@@ -1007,10 +1024,6 @@ class sh_EntityProperties(PropertyGroup):
 		default = {'training', 'classic', 'expert', 'zen', 'versus', 'coop'},
 		)
 	
-	##################
-	# Mesh properties
-	##################
-	
 	sh_visible: BoolProperty(
 		name = "Visible",
 		description = "If the box will appear in the exported mesh",
@@ -1070,11 +1083,7 @@ class sh_EntityProperties(PropertyGroup):
 		min = 0.0,
 		max = 128.0,
 		size = 3
-	) 
-	
-	########################
-	# Back to normal things
-	########################
+	)
 	
 	sh_decal: IntProperty(
 		name = "Decal",
@@ -1089,10 +1098,6 @@ class sh_EntityProperties(PropertyGroup):
 		description = "If this box should show reflections",
 		default = False
 		)
-	
-	#############
-	# Paramaters
-	#############
 	
 	sh_param0: StringProperty(
 		name = "param0",
@@ -1178,10 +1183,6 @@ class sh_EntityProperties(PropertyGroup):
 		maxlen = SH_MAX_STR_LEN,
 		)
 	
-	###############
-	# Other values
-	###############
-	
 	sh_havetint: BoolProperty(
 		name = "Add decal colourisation",
 		description = "Changes the tint (colourisation) of the decal",
@@ -1240,6 +1241,14 @@ class sh_EntityProperties(PropertyGroup):
 		default = 1.0,
 		min = 0.0,
 		max = 1.0,
+	)
+	
+	sh_glow: FloatProperty(
+		name = "Glow",
+		description = "The intensity of the light that this box will contribtue to the scene when FastGI is enabled (this can also be used to create lights)",
+		default = 1.0,
+		min = 0.0,
+		max = 5.0,
 	)
 	
 	sh_size: FloatVectorProperty(
@@ -1323,6 +1332,7 @@ class sh_ObstaclePanel(Panel):
 		if (sh_properties.sh_type == "BOX"):
 			layout.prop(sh_properties, "sh_reflective")
 			layout.prop(sh_properties, "sh_visible")
+			layout.prop(sh_properties, "sh_glow")
 			
 			if (sh_properties.sh_visible):
 				sub = layout.box()
